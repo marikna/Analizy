@@ -1,0 +1,210 @@
+---
+title: "Przetwarzanie Danych"
+author: "Maria Knapczyk"
+subtitle: R+GIT+ML
+fig-width: 10
+fig-height: 5
+format:
+  html:
+    toc: yes
+    toc-title: Spis Treści
+    number-sections: yes
+---
+
+## Biblioteki
+```{r}
+#| warning: false
+library(dplyr)
+library(rio)
+library(ggplot2)
+library(reshape2)
+library(DT)
+library(broom)
+library(lattice)
+library(caret)
+library(RColorBrewer)
+```
+ 
+## Wybór pakietu
+```{r}
+data = rio::import('./pcos_rotterdam_balanceado.csv')
+colnames(data)
+datatable(data)
+```
+
+***
+## Opis zmiennych
+
+Dane zawierają informacje na temat diagnozy zespołu policystycznych jajników. Kolejne kolumny oznaczają odpowiednio:
+
+| Zmienna    | Opis | Typ |
+|-----|------|------|
+|  Age   | Wiek | Integer   |
+|   BMI  | Wskaźnik BMI |  Double    |
+|   Menstrual_Irregularity  | Nieregularność Menstruacji (1 - Tak/ 0 - Nie)  |  Int    |
+| Testosterone_Level(ng/dL)    | Poziom Testosteronu w (ng/dL)  | Double  |
+|  Antral_Follicle_Count   |  Ilość pęcherzyków antralnych   | Integer   |
+|  PCOS_Diagnosis   |  Diagnoza PCOS (1 - Tak/ 0 - Nie) | Integer |
+
+## Przetwarzanie danych
+```{r}
+my_style = theme_minimal() + 
+             theme(
+               plot.title = element_text(face = "bold")
+             )
+```
+
+```{r}
+data |> 
+  cor() |> 
+  heatmap(Rowv = NA, Colv = NA, cexRow = 0.7, cexCol = 0.7, margins = c(8,8), 
+          col = colorRampPalette(brewer.pal(8, "PiYG"))(25))
+
+data |> 
+  cor() |> 
+  melt() |> 
+  filter(value != 1.0) |> 
+  filter(Var1 != Var2) |> 
+  arrange(desc(value)) |> 
+  slice(seq(1, n(), by = 2))
+```
+***
+
+Widać, że diagnoza PCOS jest silnie skolerowana z jej symptomami, oprócz tego symptomy są również ze sobą mocno powiązane - jeśli występuje jeden to jest duża szansa na wystąpienia innego. 
+
+```{r}
+plots = list()
+
+for (zm in c("Testosterone_Level(ng/dL)", "Antral_Follicle_Count")) {
+  p = ggplot(data, aes(x = factor(PCOS_Diagnosis), y = .data[[zm]])) +
+    geom_boxplot(fill = c("darkseagreen1", "darkmagenta")) +
+    labs(title = paste("Wykres dla", zm), x = "Diagnoza PCOS", y = zm) +
+    my_style
+  plots[[zm]] = p
+}
+
+plot2 = ggplot(data = data, aes(x = factor(PCOS_Diagnosis), fill = factor(Menstrual_Irregularity))) + 
+  geom_bar(position = "fill") + 
+  scale_fill_manual(values = c("darkseagreen1", "darkmagenta"), labels = c("Regularność", "Nieregularność")) + 
+  labs(title = "Regularność menstruacji według zdiagnozowanej choroby", x = "Diagnoza PCOS", fill = "Nieregularność") + my_style
+
+
+plots
+plot2
+
+```
+***
+
+Poziom testosteronu, z wyłączeniem paru outlierów bardzo dobrze klasyfikuje dane, ilość pęcherzyków ma bardzo widoczną granicę pomiędzy osobą zdrową i chorą, nieregularność cyklu występuje u około 10% osób zdrowych i aż 100% osób chorych.
+
+```{r}
+data |> 
+  group_by(PCOS_Diagnosis) |> 
+  summarise(across(
+    c(BMI, Menstrual_Irregularity, `Testosterone_Level(ng/dL)`, Antral_Follicle_Count), 
+    list(mean = ~mean(.x, na.rm = TRUE), median = ~median(.x, na.rm = TRUE)))) |> 
+  knitr::kable()
+
+```
+Sprawdzam istotność statystyczną na podstawie wcześniejszej analizy
+```{r}
+t.test(`Testosterone_Level(ng/dL)` ~ PCOS_Diagnosis, data= data)
+t.test(Antral_Follicle_Count ~ PCOS_Diagnosis, data= data)
+t.test(Menstrual_Irregularity ~ PCOS_Diagnosis, data= data)
+```
+***
+
+Wszystkie zmienne są niebywale ważne, dzięki tej informacji buduję model
+
+## Budowa modelu
+Używam gml, ponieważ przewidywana zmienna jest zmienną binarną. 
+
+```{r}
+#| warning: false
+set.seed(111) 
+train_index <- createDataPartition(data$PCOS_Diagnosis, p = 0.7, list = FALSE)
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+
+model = glm(PCOS_Diagnosis ~ Menstrual_Irregularity + `Testosterone_Level(ng/dL)` + Antral_Follicle_Count,
+            data = train_data, family = binomial)
+
+summary(model)
+```
+***
+
+Początkowo nie dzieliłam danych na zbiory treningowe i testowe, tylko dopasowywałam regresję, jednak wyskakiwały mi komunikaty, że model osiąga bardzo wysoką dokładność, po podzieleniu, jest tak samo, wzorce są tak silne i tak od siebie oddzielone, występuje separacja między klasami, że od pewnego progu, model ma wysoką pewność w przewidywaniu choroby, widać z resztą wyraźne podziały na wykresach wyżej.
+
+```{r}
+prediction_probability = predict(model, newdata = test_data, type = "response")
+prediction_class = ifelse(prediction_probability > 0.5, 1, 0)
+
+confusionMatrix(factor(prediction_class), factor(test_data$PCOS_Diagnosis))
+
+```
+***
+
+Model ma 100% poprawności przewidywania.
+
+```{r}
+comparison_data = data.frame(
+  Actual = test_data$PCOS_Diagnosis,
+  Predicted = prediction_class)
+
+
+ggplot(comparison_data) +
+  # Rzeczywiste wartości
+  geom_jitter(aes(x = 1, y = Actual), color = "darkseagreen", alpha = 0.6, size = 2) +
+  # Przewidywane wartości 
+  geom_jitter(aes(x = 2, y = Predicted), color = "darkmagenta", alpha = 0.6, size = 2) +
+  scale_x_continuous(breaks = c(1, 2), labels = c("Rzeczywiste", "Przewidywane")) +
+  labs(title = "Porównanie rzeczywistych i przewidywanych wyników", 
+       x = "Typ wartości", 
+       y = "PCOS") +
+  my_style
+
+  
+```
+
+```{r}
+fit_data = augment(model)
+
+fit_data |> 
+  summarise(n = n(), mean_resid = mean(.resid))
+
+fit_data$.resid |> 
+  shapiro.test()
+
+ggplot(fit_data, aes(x = .resid)) +
+  geom_density(fill = "deeppink", alpha = 0.7) +
+  labs(title = "Rozkład gęstości reszt", x = "Reszty", y = "Gęstość") +
+  my_style
+```
+Średnia reszt jest bardzo dobra, bo bliska 0. Reszty nie są rozkładem normalnym, są za bardzo skumulowane przy wartości 0, ale w modelu glm, nie jest to wymagane. 
+
+## Dodatki
+$$ BMI = Waga[kg] / wzrost[m] ^ 2 $$
+```{r}
+#dla kobiety, przy zalozeniu wzrostu 165
+caloric_need = function(Age, BMI, wzrost = 165){
+  waga = BMI * ((wzrost / 100) ^ 2)
+  calories = 10 * waga + 6.25 * wzrost - 5 * Age - 161
+  return(calories)
+}
+
+data$Calories = caloric_need(data$Age, data$BMI)
+
+data = data |> 
+  mutate(Obesity = case_when(
+    BMI < 18.5 ~ "Underweight",
+    BMI < 25 ~ "Healthy",
+    BMI < 30 ~ "Overweight",
+    TRUE ~ "Obese"
+  ))
+
+ggplot(data) + aes(x = Age, y = Calories, color = factor(Obesity)) + geom_point() +
+  scale_color_manual(values = colorRampPalette(brewer.pal(8, "PiYG"))(4)) + 
+  labs(title = "Wykres zależności wieku i kalorii z uwzględnieniem BMI", color = "BMI") +
+  my_style
+```
+
